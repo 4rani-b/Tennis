@@ -109,15 +109,18 @@ def fetch_timetable(page, url: str, start_date: date) -> str:
     full_url = f"{url}?start_date={start_date.isoformat()}"
     log.info("  → %s", full_url)
     try:
-        page.goto(full_url, wait_until="networkidle", timeout=30_000)
-        # Wait for timetable rows or the empty-state message
+        page.goto(full_url, wait_until="domcontentloaded", timeout=30_000)
+        # Wait for timetable content or empty-state — broader selector set
         page.wait_for_selector(
-            ".weekly-timetable__row, .weekly-timetable__empty-title",
-            timeout=20_000,
+            ".weekly-timetable__row, .weekly-timetable__empty-title, "
+            "[data-category], [data-date], .timetable-session, .session",
+            timeout=30_000,
         )
     except PWTimeout:
         log.warning("  Timetable load timed out for %s", full_url)
-    return page.content()
+    html = page.content()
+    log.debug("  HTML sample: %.300s", html.replace("\n", " "))
+    return html
 
 
 def parse_timetable(
@@ -261,6 +264,29 @@ def _parse_rows(
     return slots
 
 
+_MONTH_RE = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+    r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+_DATE_PAT = re.compile(
+    rf"\b(\d{{1,2}})\s+({_MONTH_RE})\b|\b({_MONTH_RE})\s+(\d{{1,2}})\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_date_from_text(text: str, year: int) -> "date | None":
+    m = _DATE_PAT.search(text)
+    if not m:
+        return None
+    raw = m.group(0)
+    for fmt in ("%d %b", "%d %B", "%b %d", "%B %d"):
+        try:
+            return datetime.strptime(raw, fmt).replace(year=year).date()
+        except ValueError:
+            pass
+    return None
+
+
 def _parse_generic(
     soup,
     venue: dict,
@@ -268,34 +294,56 @@ def _parse_generic(
     date_from: date,
     date_to: date,
 ) -> list[dict]:
-    """Last-resort: look for any element with time + availability text."""
+    """Last-resort: find time slots and try to infer their date from DOM ancestors."""
     slots: list[dict] = []
+    seen: set[tuple] = set()
     cat_filter = venue.get("category_filter", "")
 
     for el in soup.find_all(True):
         text = el.get_text(" ", strip=True)
+        if not text or len(text) > 3000:
+            continue
         if cat_filter and cat_filter.lower() not in text.lower():
             continue
         if "full" in text.lower() or "unavailable" in text.lower():
             continue
+
         time_str = _extract_time_from_text(text)
         if not time_str:
             continue
-        in_window, label = time_in_window(time_str, time_windows)  # no date → day filter skipped
+
+        # Walk up ancestors (up to 6 levels) looking for a date
+        slot_date: "date | None" = None
+        for candidate in [el] + list(el.parents)[:6]:
+            if not hasattr(candidate, "get_text"):
+                continue
+            candidate_text = candidate.get_text(" ", strip=True)
+            if len(candidate_text) > 5000:
+                continue
+            d = _extract_date_from_text(candidate_text, date_from.year)
+            if d and date_from <= d <= date_to:
+                slot_date = d
+                break
+
+        in_window, label = time_in_window(time_str, time_windows, slot_date)
         if not in_window:
             continue
 
-        # Without reliable date info, tag as "this week"
+        key = (slot_date.isoformat() if slot_date else "week", time_str)
+        if key in seen:
+            continue
+        seen.add(key)
+
         slots.append({
             "venue": venue["name"],
-            "date": "this week",
-            "date_iso": date_from.isoformat(),
+            "date": slot_date.strftime("%A %d %B %Y") if slot_date else "this week",
+            "date_iso": slot_date.isoformat() if slot_date else date_from.isoformat(),
             "time": time_str,
             "window": label,
             "book_url": venue["book_url"],
         })
 
-    return slots[:20]  # cap to avoid noise
+    return slots[:20]
 
 
 def _extract_time_from_text(text: str) -> str:
