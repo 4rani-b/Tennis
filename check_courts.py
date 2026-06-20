@@ -3,17 +3,14 @@
 Tennis court availability checker for Better-managed venues.
 
 Polls Highbury Fields and Islington Tennis Centre via the Better
-booking system and sends an email alert when courts are available
+booking system and sends a Telegram alert when courts are available
 within the configured time windows.
 """
 
 import json
 import logging
 import os
-import smtplib
 from datetime import date, datetime, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Any
 
 import requests
@@ -338,41 +335,55 @@ def _inner(el: Any, selector: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def notify(slots: list[dict], config: dict) -> None:
-    sender = os.getenv("ALERT_EMAIL_FROM") or config.get("email_from", "")
-    recipient = os.getenv("ALERT_EMAIL_TO") or config.get("email_to", "behrod@gmail.com")
-    password = os.getenv("ALERT_EMAIL_PASSWORD") or config.get("email_password", "")
-    smtp_host = os.getenv("SMTP_HOST") or config.get("smtp_host", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT") or config.get("smtp_port", 587))
-
-    if not sender or not password:
-        log.warning("Email credentials not set — printing to stdout")
-        for s in slots:
-            print(f"[AVAILABLE] {s['venue']} | {s['date']} | {s['time']} ({s['window']}) | {s['book_url']}")
-        return
-
-    lines = ["Tennis courts available — book now!\n"]
+def _format_slots_text(slots: list[dict]) -> str:
+    lines = [f"🎾 {len(slots)} tennis court slot(s) available — book now!\n"]
     for s in slots:
         lines.append(
             f"• {s['venue']}\n"
             f"  {s['date']} at {s['time']}  ({s['window']})\n"
             f"  {s['book_url']}\n"
         )
-    body = "\n".join(lines)
+    return "\n".join(lines)
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[Tennis Alert] {len(slots)} court slot(s) available"
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.attach(MIMEText(body, "plain"))
 
-    with smtplib.SMTP(smtp_host, smtp_port) as srv:
-        srv.ehlo()
-        srv.starttls()
-        srv.login(sender, password)
-        srv.sendmail(sender, recipient, msg.as_string())
+def _send_telegram(slots: list[dict], config: dict) -> bool:
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or config.get("telegram_bot_token", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID") or config.get("telegram_chat_id", "")
 
-    log.info("Alert sent to %s (%d slot(s))", recipient, len(slots))
+    if not token or not chat_id:
+        return False
+
+    lines = [f"🎾 <b>{len(slots)} court slot(s) available — book now!</b>\n"]
+    for s in slots:
+        lines.append(
+            f"📍 <b>{s['venue']}</b>\n"
+            f"🗓 {s['date']} at <b>{s['time']}</b> ({s['window']})\n"
+            f"🔗 <a href=\"{s['book_url']}\">Book this slot</a>\n"
+        )
+    text = "\n".join(lines)
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        log.info("Telegram alert sent to chat %s (%d slot(s))", chat_id, len(slots))
+        return True
+    except requests.RequestException as exc:
+        log.error("Telegram notification failed: %s", exc)
+        return False
+
+
+def notify(slots: list[dict], config: dict) -> None:
+    if not _send_telegram(slots, config):
+        log.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — printing to stdout")
+        print(_format_slots_text(slots))
 
 
 # ---------------------------------------------------------------------------

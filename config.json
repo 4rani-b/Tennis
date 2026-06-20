@@ -24,17 +24,18 @@
 
   "days_ahead": 7,
 
-  "email_to": "behrod@gmail.com",
-
-  "_email_note": [
-    "Set credentials via GitHub Secrets (preferred) rather than storing them here.",
-    "Required secrets: ALERT_EMAIL_FROM, ALERT_EMAIL_PASSWORD",
-    "For Gmail, use an App Password (https://myaccount.google.com/apppasswords)",
-    "and make sure 2-Step Verification is enabled on the sending account."
+  "_telegram_note": [
+    "Set credentials via GitHub Secrets rather than storing them here.",
+    "Required secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID",
+    "",
+    "Setup steps:",
+    "  1. Open Telegram and message @BotFather",
+    "  2. Send /newbot, choose a name and username → BotFather gives you a token",
+    "  3. Start a chat with your new bot (so it can message you)",
+    "  4. Visit https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates in a browser",
+    "     after sending the bot any message — you'll see your chat_id in the JSON",
+    "  5. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as GitHub repo secrets"
   ],
-
-  "smtp_host": "smtp.gmail.com",
-  "smtp_port": 587,
 
   "_api_note": [
     "Better's booking API endpoint is discovered from browser network traffic.",
