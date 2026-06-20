@@ -119,7 +119,7 @@ def fetch_timetable(page, url: str, start_date: date) -> str:
     except PWTimeout:
         log.warning("  Timetable load timed out for %s", full_url)
     html = page.content()
-    log.debug("  HTML sample: %.300s", html.replace("\n", " "))
+    log.info("  HTML sample (first 1000 chars): %.1000s", html.replace("\n", " "))
     return html
 
 

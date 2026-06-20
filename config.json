@@ -4,8 +4,7 @@
       "name": "Highbury Fields Tennis Courts",
       "timetable_url": "https://www.better.org.uk/leisure-centre/london/islington/islington-parks/timetable",
       "book_url": "https://www.better.org.uk/leisure-centre/london/islington/islington-parks",
-      "category_filter": "tennis",
-      "_note": "If no results appear, try timetable_url ending in /highbury/timetable"
+      "category_filter": ""
     },
     {
       "name": "Islington Tennis Centre",
