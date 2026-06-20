@@ -1,0 +1,37 @@
+name: Tennis Court Availability Check
+
+on:
+  schedule:
+    # Runs every 30 minutes between 06:30 and 21:30 London time (UTC+1 BST / UTC+0 GMT).
+    # Cron uses UTC; adjust the hour range if clocks change.
+    # Current schedule targets 05:30–20:30 UTC which covers 06:30–21:30 BST.
+    - cron: "0,30 5-20 * * *"
+  workflow_dispatch:   # Allow manual trigger from the Actions tab
+
+jobs:
+  check:
+    name: Check court availability
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check court availability
+        env:
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          ALERT_EMAIL_PASSWORD: ${{ secrets.ALERT_EMAIL_PASSWORD }}
+          # Override recipient here if you want a different address than the one in config.json
+          # ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          DAYS_AHEAD: "7"
+        run: python check_courts.py

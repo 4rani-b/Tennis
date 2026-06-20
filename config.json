@@ -1,0 +1,47 @@
+{
+  "_comment": "Edit this file to customise venues, time windows, and notification settings.",
+
+  "venues": [
+    {
+      "name": "Highbury Fields Tennis Courts",
+      "slug": "highbury-fields-tennis-courts",
+      "location": "islington",
+      "activity": "tennis"
+    },
+    {
+      "name": "Islington Tennis Centre",
+      "slug": "islington-tennis-centre",
+      "location": "islington",
+      "activity": "tennis"
+    }
+  ],
+
+  "time_windows": [
+    { "start": "07:00", "end": "10:00", "label": "Morning" },
+    { "start": "12:00", "end": "14:00", "label": "Lunchtime" },
+    { "start": "17:30", "end": "21:00", "label": "Evening" }
+  ],
+
+  "days_ahead": 7,
+
+  "email_to": "behrod@gmail.com",
+
+  "_email_note": [
+    "Set credentials via GitHub Secrets (preferred) rather than storing them here.",
+    "Required secrets: ALERT_EMAIL_FROM, ALERT_EMAIL_PASSWORD",
+    "For Gmail, use an App Password (https://myaccount.google.com/apppasswords)",
+    "and make sure 2-Step Verification is enabled on the sending account."
+  ],
+
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+
+  "_api_note": [
+    "Better's booking API endpoint is discovered from browser network traffic.",
+    "If the default endpoint stops working, set slot_api_url to the correct URL",
+    "or override it with the BETTER_SLOT_API_URL environment variable.",
+    "To find it: open DevTools → Network → XHR, then navigate to a venue booking",
+    "page on better.org.uk and select a date."
+  ],
+  "slot_api_url": ""
+}
