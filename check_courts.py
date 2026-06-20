@@ -2,19 +2,22 @@
 """
 Tennis court availability checker for Better-managed venues.
 
-Polls Highbury Fields and Islington Tennis Centre via the Better
-booking system and sends a Telegram alert when courts are available
-within the configured time windows.
+Uses a headless browser (Playwright) to render the Better timetable pages
+(which are Cloudflare-protected and JavaScript-rendered), then parses
+available tennis slots and sends a Telegram alert.
 """
 
 import json
 import logging
 import os
+import re
+import smtplib
 from datetime import date, datetime, timedelta
-from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,40 +25,32 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-BETTER_BASE = "https://better.org.uk"
+BETTER_BASE = "https://www.better.org.uk"
 
-# Default venues — override in config.json
+# Venue timetable URLs discovered from the Better sitemap.
+# Each venue is checked once per week-start date needed to cover days_ahead.
 DEFAULT_VENUES = [
     {
         "name": "Highbury Fields Tennis Courts",
-        "slug": "highbury-fields-tennis-courts",
-        "location": "islington",
-        "activity": "tennis",
+        # Highbury Fields outdoor courts appear under the islington-parks venue.
+        # If this shows no tennis results, try slug "highbury" or "islingtontc".
+        "timetable_url": f"{BETTER_BASE}/leisure-centre/london/islington/islington-parks/timetable",
+        "book_url": f"{BETTER_BASE}/leisure-centre/london/islington/islington-parks",
+        "category_filter": "tennis",
     },
     {
         "name": "Islington Tennis Centre",
-        "slug": "islington-tennis-centre",
-        "location": "islington",
-        "activity": "tennis",
+        "timetable_url": f"{BETTER_BASE}/leisure-centre/london/islington/islingtontc/timetable",
+        "book_url": f"{BETTER_BASE}/leisure-centre/london/islington/islingtontc/tennis",
+        "category_filter": "tennis",
     },
 ]
 
-# Default time windows — override in config.json
 DEFAULT_TIME_WINDOWS = [
     {"start": "07:00", "end": "10:00", "label": "Morning"},
     {"start": "12:00", "end": "14:00", "label": "Lunchtime"},
     {"start": "17:30", "end": "21:00", "label": "Evening"},
 ]
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/html, */*",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Referer": BETTER_BASE + "/",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +72,7 @@ def load_config() -> dict:
 
 
 def time_in_window(slot_time: str, windows: list[dict]) -> tuple[bool, str]:
-    """Return (matches, window_label) for a HH:MM slot time."""
+    """Return (matches, window_label) for a HH:MM time string."""
     try:
         t = datetime.strptime(slot_time[:5], "%H:%M").time()
     except ValueError:
@@ -91,243 +86,268 @@ def time_in_window(slot_time: str, windows: list[dict]) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Checker
+# Timetable fetching via Playwright
 # ---------------------------------------------------------------------------
 
 
-class BetterChecker:
-    def __init__(self, time_windows: list[dict]) -> None:
-        self.time_windows = time_windows
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
+def _week_start(d: date) -> date:
+    """Return the Monday of the week containing d."""
+    return d - timedelta(days=d.weekday())
 
-    # ------------------------------------------------------------------
-    # Public entry point
-    # ------------------------------------------------------------------
 
-    def check_all(self, venues: list[dict], days_ahead: int) -> list[dict]:
-        today = date.today()
-        found: list[dict] = []
-        for offset in range(days_ahead):
-            check_date = today + timedelta(days=offset)
-            for venue in venues:
-                log.info("Checking %s on %s", venue["name"], check_date)
-                slots = self._get_slots(venue, check_date)
-                if slots:
-                    log.info("  %d matching slot(s)", len(slots))
-                found.extend(slots)
-        return found
-
-    # ------------------------------------------------------------------
-    # API strategy (tried first — JSON response)
-    # ------------------------------------------------------------------
-
-    def _get_slots(self, venue: dict, check_date: date) -> list[dict]:
-        slots = self._try_api(venue, check_date)
-        if slots is not None:
-            return slots
-        return self._try_scrape(venue, check_date)
-
-    def _try_api(self, venue: dict, check_date: date) -> list[dict] | None:
-        """
-        Better exposes a JSON API used by their mobile apps and website SPA.
-        The endpoint below was identified from browser network traffic; it may
-        need updating if Better changes their backend.
-
-        To find the correct URL yourself:
-          1. Open Chrome DevTools → Network tab → filter XHR/Fetch
-          2. Visit the venue booking page on better.org.uk
-          3. Select a date — watch for requests returning slot JSON
-          4. Copy the URL and update SLOT_API_URL in config.json
-        """
-        api_url = (
-            os.getenv("BETTER_SLOT_API_URL")
-            or load_config().get("slot_api_url")
-            or f"{BETTER_BASE}/api/activities/{venue['slug']}/slots"
+def fetch_timetable(page, url: str, start_date: date) -> str:
+    """Navigate to a timetable page for a given week start and return HTML."""
+    full_url = f"{url}?start_date={start_date.isoformat()}"
+    log.info("  → %s", full_url)
+    try:
+        page.goto(full_url, wait_until="networkidle", timeout=30_000)
+        # Wait for timetable rows or the empty-state message
+        page.wait_for_selector(
+            ".weekly-timetable__row, .weekly-timetable__empty-title",
+            timeout=20_000,
         )
+    except PWTimeout:
+        log.warning("  Timetable load timed out for %s", full_url)
+    return page.content()
 
-        params = {
-            "date": check_date.isoformat(),
-            "location": venue["location"],
-            "activity": venue.get("activity", "tennis"),
-        }
 
-        try:
-            resp = self.session.get(api_url, params=params, timeout=15)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            data = resp.json()
-            return self._parse_json(data, venue, check_date)
-        except (requests.RequestException, ValueError) as exc:
-            log.debug("API attempt failed (%s), falling back to HTML scrape", exc)
-            return None
+def parse_timetable(
+    html: str,
+    venue: dict,
+    time_windows: list[dict],
+    date_from: date,
+    date_to: date,
+) -> list[dict]:
+    """
+    Parse a Better weekly timetable page (server-rendered HTML) into slots.
 
-    def _parse_json(
-        self, data: Any, venue: dict, check_date: date
-    ) -> list[dict]:
-        # Normalise to a flat list regardless of response shape
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = (
-                data.get("slots")
-                or data.get("data")
-                or data.get("results")
-                or data.get("sessions")
-                or []
-            )
+    The timetable uses a column-per-day layout. Each day column has a header
+    with the date and a list of session rows underneath.
+
+    Row data attributes (from the Better JS bundle):
+      data-category, data-subcategory, data-session,
+      data-time_of_day (or data-time-of-day), data-free_spaces
+    """
+    soup = BeautifulSoup(html, "lxml")
+    slots: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Strategy 1: rows carry data attributes with time + free spaces
+    # ------------------------------------------------------------------
+    rows = soup.select(
+        ".weekly-timetable__row[data-category], "
+        "[data-category][data-free-spaces], "
+        "[data-category][data-free_spaces]"
+    )
+    if rows:
+        slots.extend(_parse_rows(rows, venue, time_windows, date_from, date_to, soup))
+        if slots:
+            return slots
+
+    # ------------------------------------------------------------------
+    # Strategy 2: look for any element with a time + spaces pattern
+    # ------------------------------------------------------------------
+    slots.extend(_parse_generic(soup, venue, time_windows, date_from, date_to))
+    return slots
+
+
+def _parse_rows(
+    rows,
+    venue: dict,
+    time_windows: list[dict],
+    date_from: date,
+    date_to: date,
+    soup,
+) -> list[dict]:
+    slots: list[dict] = []
+
+    # Build a mapping of day-column index → date from column headers
+    col_dates: dict[int, date] = {}
+    for i, header in enumerate(soup.select(".weekly-timetable__header-cell, [data-date]")):
+        date_val = header.get("data-date") or header.get("data-timetables_items_date")
+        if date_val:
+            try:
+                col_dates[i] = date.fromisoformat(date_val[:10])
+            except ValueError:
+                pass
         else:
-            return []
+            # Try to parse date text like "Mon 20 Jun"
+            text = header.get_text(strip=True)
+            m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", text)
+            if not m:
+                m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})", text)
+            if m:
+                try:
+                    day_str = m.group(0)
+                    for fmt in ("%d %b %Y", "%d %b"):
+                        try:
+                            parsed = datetime.strptime(day_str, fmt)
+                            col_dates[i] = parsed.replace(year=date.today().year).date()
+                            break
+                        except ValueError:
+                            pass
+                except Exception:
+                    pass
 
-        slots: list[dict] = []
-        for item in items:
-            if not item.get("available", True):
-                continue
-            time_str = (
-                item.get("time")
-                or item.get("start_time")
-                or item.get("startTime")
-                or item.get("begins_at", "")
-            )
-            in_window, label = time_in_window(str(time_str), self.time_windows)
-            if not in_window:
-                continue
-            book_url = (
-                item.get("book_url")
-                or item.get("bookUrl")
-                or item.get("booking_url")
-                or self._venue_book_url(venue)
-            )
-            if book_url and not book_url.startswith("http"):
-                book_url = BETTER_BASE + book_url
-            slots.append(
-                self._make_slot(venue["name"], check_date, str(time_str), label, book_url)
-            )
-        return slots
+    for row in rows:
+        # Category filter
+        category = row.get("data-category", "")
+        if venue.get("category_filter") and venue["category_filter"].lower() not in category.lower():
+            continue
 
-    # ------------------------------------------------------------------
-    # HTML scrape strategy (fallback)
-    # ------------------------------------------------------------------
-
-    def _try_scrape(self, venue: dict, check_date: date) -> list[dict]:
-        url = self._venue_book_url(venue)
-        params = {"date": check_date.isoformat()}
+        # Availability
+        free = row.get("data-free-spaces") or row.get("data-free_spaces", "0")
         try:
-            resp = self.session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            log.warning("Could not fetch %s: %s", venue["name"], exc)
-            return []
+            if int(free) <= 0:
+                continue
+        except (ValueError, TypeError):
+            pass
 
-        # Better's SPA sometimes embeds slot data in a __NEXT_DATA__ script
-        slots = self._parse_next_data(resp.text, venue, check_date)
-        if slots is not None:
-            return slots
-
-        # Last resort: find slot elements in rendered HTML
-        return self._parse_html_slots(resp.text, venue, check_date, url)
-
-    def _parse_next_data(
-        self, html: str, venue: dict, check_date: date
-    ) -> list[dict] | None:
-        soup = BeautifulSoup(html, "html.parser")
-        script = soup.find("script", {"id": "__NEXT_DATA__"})
-        if not script or not script.string:
-            return None
-        try:
-            page_data = json.loads(script.string)
-        except ValueError:
-            return None
-
-        # Walk the page props to find anything resembling slot data
-        def _walk(obj: Any) -> list[dict]:
-            if isinstance(obj, list) and obj and isinstance(obj[0], dict):
-                if any(k in obj[0] for k in ("time", "startTime", "start_time", "begins_at")):
-                    return self._parse_json(obj, venue, check_date)
-            if isinstance(obj, dict):
-                for v in obj.values():
-                    result = _walk(v)
-                    if result:
-                        return result
-            return []
-
-        return _walk(page_data)
-
-    def _parse_html_slots(
-        self, html: str, venue: dict, check_date: date, page_url: str
-    ) -> list[dict]:
-        soup = BeautifulSoup(html, "html.parser")
-        slots: list[dict] = []
-
-        # Common selectors used by Better's booking pages (inspect the live
-        # page and update these if the structure changes)
-        candidates = soup.select(
-            "[data-time], [data-start-time], "
-            ".time-slot, .slot-item, .booking-slot, "
-            ".activity-session, .session-card"
+        # Time
+        time_str = (
+            row.get("data-time_of_day")
+            or row.get("data-time-of-day")
+            or row.get("data-start-time")
+            or _extract_time_from_text(row.get_text(" ", strip=True))
         )
+        if not time_str:
+            continue
 
-        for el in candidates:
-            time_str = (
-                el.get("data-time")
-                or el.get("data-start-time")
-                or _inner(el, ".time, .slot-time, .start-time, time")
-            )
-            if not time_str:
-                continue
+        in_window, label = time_in_window(str(time_str), time_windows)
+        if not in_window:
+            continue
 
-            classes = " ".join(el.get("class", []))
-            if any(x in classes for x in ("unavailable", "full", "disabled", "sold-out")):
-                continue
-            if el.get("data-available") == "false" or el.get("disabled"):
-                continue
+        # Date — try data attribute first, then infer from column
+        slot_date_str = row.get("data-date") or row.get("data-timetables_items_date")
+        slot_date: date | None = None
+        if slot_date_str:
+            try:
+                slot_date = date.fromisoformat(slot_date_str[:10])
+            except ValueError:
+                pass
+        if slot_date is None:
+            # Fallback: find which column this row belongs to
+            col_idx = _column_index(row, soup)
+            slot_date = col_dates.get(col_idx)
 
-            in_window, label = time_in_window(str(time_str), self.time_windows)
-            if not in_window:
-                continue
+        if slot_date is None or not (date_from <= slot_date <= date_to):
+            continue
 
-            link = el.get("href") or ""
-            anchor = el.select_one("a[href]")
-            if anchor:
-                link = anchor["href"]
-            if link and not link.startswith("http"):
-                link = BETTER_BASE + link
-            book_url = link or page_url
+        # Book URL
+        link_el = row.select_one("a[href]")
+        book_url = venue["book_url"]
+        if link_el:
+            href = link_el["href"]
+            book_url = href if href.startswith("http") else BETTER_BASE + href
 
-            slots.append(
-                self._make_slot(venue["name"], check_date, str(time_str), label, book_url)
-            )
-
-        return slots
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _venue_book_url(self, venue: dict) -> str:
-        return (
-            f"{BETTER_BASE}/leisure-centre/{venue['location']}"
-            f"/{venue['slug']}/book-now/{venue.get('activity', 'tennis')}"
-        )
-
-    @staticmethod
-    def _make_slot(
-        venue_name: str, check_date: date, time_str: str, label: str, book_url: str
-    ) -> dict:
-        return {
-            "venue": venue_name,
-            "date": check_date.strftime("%A %d %B %Y"),
-            "date_iso": check_date.isoformat(),
-            "time": time_str,
+        slots.append({
+            "venue": venue["name"],
+            "date": slot_date.strftime("%A %d %B %Y"),
+            "date_iso": slot_date.isoformat(),
+            "time": str(time_str),
             "window": label,
             "book_url": book_url,
-        }
+        })
+
+    return slots
 
 
-def _inner(el: Any, selector: str) -> str:
-    found = el.select_one(selector)
-    return found.get_text(strip=True) if found else ""
+def _parse_generic(
+    soup,
+    venue: dict,
+    time_windows: list[dict],
+    date_from: date,
+    date_to: date,
+) -> list[dict]:
+    """Last-resort: look for any element with time + availability text."""
+    slots: list[dict] = []
+    cat_filter = venue.get("category_filter", "")
+
+    for el in soup.find_all(True):
+        text = el.get_text(" ", strip=True)
+        if cat_filter and cat_filter.lower() not in text.lower():
+            continue
+        if "full" in text.lower() or "unavailable" in text.lower():
+            continue
+        time_str = _extract_time_from_text(text)
+        if not time_str:
+            continue
+        in_window, label = time_in_window(time_str, time_windows)
+        if not in_window:
+            continue
+
+        # Without reliable date info, tag as "this week"
+        slots.append({
+            "venue": venue["name"],
+            "date": "this week",
+            "date_iso": date_from.isoformat(),
+            "time": time_str,
+            "window": label,
+            "book_url": venue["book_url"],
+        })
+
+    return slots[:20]  # cap to avoid noise
+
+
+def _extract_time_from_text(text: str) -> str:
+    m = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text or "")
+    return m.group(0) if m else ""
+
+
+def _column_index(row, soup) -> int:
+    """Best-effort: find which day-column a timetable row is in."""
+    parent = row.parent
+    while parent and parent.name not in ("td", "th", "div", "section"):
+        parent = parent.parent
+    if parent is None:
+        return 0
+    siblings = list(parent.parent.children) if parent.parent else []
+    for i, sib in enumerate(siblings):
+        if sib is parent:
+            return i
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Main checker
+# ---------------------------------------------------------------------------
+
+
+def check_all(venues: list[dict], time_windows: list[dict], days_ahead: int) -> list[dict]:
+    today = date.today()
+    date_to = today + timedelta(days=days_ahead - 1)
+
+    # Determine which week-start dates we need to fetch per venue
+    week_starts: list[date] = sorted(
+        {_week_start(today + timedelta(days=d)) for d in range(days_ahead)}
+    )
+
+    all_slots: list[dict] = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-GB",
+        )
+        page = ctx.new_page()
+
+        for venue in venues:
+            log.info("Checking %s", venue["name"])
+            for ws in week_starts:
+                html = fetch_timetable(page, venue["timetable_url"], ws)
+                slots = parse_timetable(html, venue, time_windows, today, date_to)
+                if slots:
+                    log.info("  Found %d matching slot(s) week of %s", len(slots), ws)
+                all_slots.extend(slots)
+
+        browser.close()
+
+    return all_slots
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +377,7 @@ def _send_telegram(slots: list[dict], config: dict) -> bool:
     for s in slots:
         lines.append(
             f"📍 <b>{s['venue']}</b>\n"
-            f"🗓 {s['date']} at <b>{s['time']}</b> ({s['window']})\n"
+            f"🗓 {s['date']} at <b>{s['time']}</b>  ({s['window']})\n"
             f"🔗 <a href=\"{s['book_url']}\">Book this slot</a>\n"
         )
     text = "\n".join(lines)
@@ -369,11 +389,10 @@ def _send_telegram(slots: list[dict], config: dict) -> bool:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-
     try:
         resp = requests.post(url, json=payload, timeout=10)
         resp.raise_for_status()
-        log.info("Telegram alert sent to chat %s (%d slot(s))", chat_id, len(slots))
+        log.info("Telegram alert sent (%d slot(s))", len(slots))
         return True
     except requests.RequestException as exc:
         log.error("Telegram notification failed: %s", exc)
@@ -393,16 +412,14 @@ def notify(slots: list[dict], config: dict) -> None:
 
 def main() -> None:
     config = load_config()
-
     venues = config.get("venues", DEFAULT_VENUES)
     time_windows = config.get("time_windows", DEFAULT_TIME_WINDOWS)
     days_ahead = int(os.getenv("DAYS_AHEAD") or config.get("days_ahead", 7))
 
-    checker = BetterChecker(time_windows)
-    available = checker.check_all(venues, days_ahead)
+    available = check_all(venues, time_windows, days_ahead)
 
     if available:
-        log.info("Total matching slots found: %d", len(available))
+        log.info("Total matching slots: %d", len(available))
         notify(available, config)
     else:
         log.info("No matching slots found")

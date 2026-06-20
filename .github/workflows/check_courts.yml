@@ -3,16 +3,15 @@ name: Tennis Court Availability Check
 on:
   schedule:
     # Runs every 30 minutes between 06:30 and 21:30 London time (UTC+1 BST / UTC+0 GMT).
-    # Cron uses UTC; adjust the hour range if clocks change.
-    # Current schedule targets 05:30–20:30 UTC which covers 06:30–21:30 BST.
+    # Cron uses UTC; adjust hour range when clocks change (currently BST = UTC+1).
     - cron: "0,30 5-20 * * *"
-  workflow_dispatch:   # Allow manual trigger from the Actions tab
+  workflow_dispatch:
 
 jobs:
   check:
     name: Check court availability
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -24,8 +23,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
 
       - name: Check court availability
         env:

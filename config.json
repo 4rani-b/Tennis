@@ -4,15 +4,16 @@
   "venues": [
     {
       "name": "Highbury Fields Tennis Courts",
-      "slug": "highbury-fields-tennis-courts",
-      "location": "islington",
-      "activity": "tennis"
+      "timetable_url": "https://www.better.org.uk/leisure-centre/london/islington/islington-parks/timetable",
+      "book_url": "https://www.better.org.uk/leisure-centre/london/islington/islington-parks",
+      "category_filter": "tennis",
+      "_note": "Highbury Fields outdoor courts are listed under the islington-parks venue. If no tennis slots appear, try changing timetable_url to end in /highbury/timetable instead."
     },
     {
       "name": "Islington Tennis Centre",
-      "slug": "islington-tennis-centre",
-      "location": "islington",
-      "activity": "tennis"
+      "timetable_url": "https://www.better.org.uk/leisure-centre/london/islington/islingtontc/timetable",
+      "book_url": "https://www.better.org.uk/leisure-centre/london/islington/islingtontc/tennis",
+      "category_filter": "tennis"
     }
   ],
 
@@ -26,20 +27,5 @@
 
   "telegram_chat_id": "5329676533",
 
-  "_telegram_note": [
-    "telegram_chat_id is already set above.",
-    "You still need to add TELEGRAM_BOT_TOKEN as a GitHub repo secret:",
-    "  Repo → Settings → Secrets and variables → Actions → New repository secret",
-    "  Name:  TELEGRAM_BOT_TOKEN",
-    "  Value: your bot token from @BotFather"
-  ],
-
-  "_api_note": [
-    "Better's booking API endpoint is discovered from browser network traffic.",
-    "If the default endpoint stops working, set slot_api_url to the correct URL",
-    "or override it with the BETTER_SLOT_API_URL environment variable.",
-    "To find it: open DevTools → Network → XHR, then navigate to a venue booking",
-    "page on better.org.uk and select a date."
-  ],
-  "slot_api_url": ""
+  "_telegram_note": "Set TELEGRAM_BOT_TOKEN as a GitHub repo secret. Chat ID is already stored above."
 }
