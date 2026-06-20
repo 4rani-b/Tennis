@@ -30,6 +30,5 @@ jobs:
       - name: Check court availability
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DAYS_AHEAD: "7"
         run: python check_courts.py

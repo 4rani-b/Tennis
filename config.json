@@ -24,17 +24,14 @@
 
   "days_ahead": 7,
 
+  "telegram_chat_id": "5329676533",
+
   "_telegram_note": [
-    "Set credentials via GitHub Secrets rather than storing them here.",
-    "Required secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID",
-    "",
-    "Setup steps:",
-    "  1. Open Telegram and message @BotFather",
-    "  2. Send /newbot, choose a name and username → BotFather gives you a token",
-    "  3. Start a chat with your new bot (so it can message you)",
-    "  4. Visit https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates in a browser",
-    "     after sending the bot any message — you'll see your chat_id in the JSON",
-    "  5. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as GitHub repo secrets"
+    "telegram_chat_id is already set above.",
+    "You still need to add TELEGRAM_BOT_TOKEN as a GitHub repo secret:",
+    "  Repo → Settings → Secrets and variables → Actions → New repository secret",
+    "  Name:  TELEGRAM_BOT_TOKEN",
+    "  Value: your bot token from @BotFather"
   ],
 
   "_api_note": [
