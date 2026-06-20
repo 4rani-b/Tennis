@@ -71,13 +71,22 @@ def load_config() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def time_in_window(slot_time: str, windows: list[dict]) -> tuple[bool, str]:
-    """Return (matches, window_label) for a HH:MM time string."""
+def time_in_window(slot_time: str, windows: list[dict], slot_date: date | None = None) -> tuple[bool, str]:
+    """Return (matches, window_label) for a HH:MM time string.
+
+    Windows can include an optional 'days' list of 3-letter day names
+    (e.g. ["Mon","Tue","Wed","Thu","Fri"]) to restrict which days the
+    window applies. If 'days' is absent the window applies every day.
+    """
     try:
         t = datetime.strptime(slot_time[:5], "%H:%M").time()
     except ValueError:
         return False, ""
+    day_abbr = slot_date.strftime("%a") if slot_date else None
     for w in windows:
+        allowed_days = w.get("days")
+        if allowed_days and day_abbr and day_abbr not in allowed_days:
+            continue
         start = datetime.strptime(w["start"], "%H:%M").time()
         end = datetime.strptime(w["end"], "%H:%M").time()
         if start <= t <= end:
@@ -213,10 +222,6 @@ def _parse_rows(
         if not time_str:
             continue
 
-        in_window, label = time_in_window(str(time_str), time_windows)
-        if not in_window:
-            continue
-
         # Date — try data attribute first, then infer from column
         slot_date_str = row.get("data-date") or row.get("data-timetables_items_date")
         slot_date: date | None = None
@@ -231,6 +236,10 @@ def _parse_rows(
             slot_date = col_dates.get(col_idx)
 
         if slot_date is None or not (date_from <= slot_date <= date_to):
+            continue
+
+        in_window, label = time_in_window(str(time_str), time_windows, slot_date)
+        if not in_window:
             continue
 
         # Book URL
@@ -272,7 +281,7 @@ def _parse_generic(
         time_str = _extract_time_from_text(text)
         if not time_str:
             continue
-        in_window, label = time_in_window(time_str, time_windows)
+        in_window, label = time_in_window(time_str, time_windows)  # no date → day filter skipped
         if not in_window:
             continue
 
@@ -373,12 +382,12 @@ def _send_telegram(slots: list[dict], config: dict) -> bool:
     if not token or not chat_id:
         return False
 
-    lines = [f"🎾 <b>{len(slots)} court slot(s) available — book now!</b>\n"]
+    lines = ["🎾 <b>Tennis court available!</b>\n"]
     for s in slots:
         lines.append(
             f"📍 <b>{s['venue']}</b>\n"
-            f"🗓 {s['date']} at <b>{s['time']}</b>  ({s['window']})\n"
-            f"🔗 <a href=\"{s['book_url']}\">Book this slot</a>\n"
+            f"🗓 {s['date']} at <b>{s['time']}</b>\n"
+            f"🔗 <a href=\"{s['book_url']}\">Book now</a>\n"
         )
     text = "\n".join(lines)
 
