@@ -2,9 +2,8 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    # Runs every 30 minutes between 06:30 and 21:30 London time (UTC+1 BST / UTC+0 GMT).
-    # Cron uses UTC; adjust hour range when clocks change (currently BST = UTC+1).
-    - cron: "0,30 5-20 * * *"
+    # Runs every 15 minutes, 24/7, at :09 :24 :39 :54 past each hour (UTC).
+    - cron: "9,24,39,54 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -25,6 +24,12 @@ jobs:
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
 
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
