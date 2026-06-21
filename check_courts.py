@@ -463,8 +463,10 @@ def fetch_booking_page(page, url: str, slot_date: date) -> tuple[str, list[dict]
         try:
             data = response.json()
             api_responses.append({"url": ru, "data": data})
-            preview = json.dumps(data)[:300]
-            log.info("  [API body] %s", preview)
+            if "/v2/times" in ru or "/times?" in ru:
+                log.info("  [TIMES] %s", json.dumps(data)[:2000])
+            else:
+                log.info("  [API body] %s", json.dumps(data)[:200])
         except Exception:
             pass
 
@@ -512,7 +514,11 @@ def _slots_from_api(api_responses: list[dict], venue: dict, time_windows: list[d
             if not isinstance(item, dict):
                 continue
 
-            # Availability check
+            # Skip the Better /v2/times API "not_available" flag
+            if item.get("not_available") or item.get("is_available") is False:
+                continue
+
+            # Availability check — generic field names
             spaces = item.get("spaces") or item.get("free_spaces") or item.get("availability") or item.get("remaining")
             if spaces is not None:
                 try:
@@ -525,11 +531,15 @@ def _slots_from_api(api_responses: list[dict], venue: dict, time_windows: list[d
             if status in ("unavailable", "booked", "full", "closed", "cancelled"):
                 continue
 
-            # Time
-            time_str = (
-                item.get("start_time") or item.get("startTime") or item.get("time")
-                or item.get("start") or item.get("slot_time") or ""
-            )
+            # Better /v2/times API: time is nested in starts_at.format_24_hour
+            starts_at = item.get("starts_at")
+            if isinstance(starts_at, dict):
+                time_str = starts_at.get("format_24_hour", "")
+            else:
+                time_str = (
+                    item.get("start_time") or item.get("startTime") or item.get("time")
+                    or item.get("start") or item.get("slot_time") or ""
+                )
             if not time_str:
                 time_str = _extract_time_from_text(str(item))
             if not time_str:
