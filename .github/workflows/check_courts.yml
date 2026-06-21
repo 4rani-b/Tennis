@@ -2,7 +2,7 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    # Runs every 15 minutes during UK waking hours (06:00–23:00 UTC, covers BST evenings).
+    # Backup schedule in case the self-chain breaks.
     - cron: "0,15,30,45 6-23 * * *"
   workflow_dispatch:
     inputs:
@@ -10,6 +10,11 @@ on:
         description: "Send all currently available slots (ignores deduplication)"
         type: boolean
         default: false
+
+# Prevent overlapping runs
+concurrency:
+  group: tennis-check
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -45,3 +50,24 @@ jobs:
           DAYS_AHEAD: "7"
           SEND_ALL: ${{ github.event.inputs.send_all }}
         run: python check_courts.py
+
+  reschedule:
+    name: Schedule next run
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Don't self-chain on send_all runs or if no CRON_TOKEN secret is set
+    if: github.event.inputs.send_all != 'true'
+
+    steps:
+      - name: Wait 15 minutes then trigger next run
+        env:
+          CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
+        run: |
+          sleep 900
+          curl -s -X POST \
+            -H "Authorization: Bearer $CRON_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/4rani-b/Tennis/actions/workflows/check_courts.yml/dispatches \
+            -d '{"ref":"main"}'
