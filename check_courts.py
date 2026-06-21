@@ -439,6 +439,88 @@ def _column_index(row, soup) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Booking-page parser (bookings.better.org.uk per-date pages)
+# ---------------------------------------------------------------------------
+
+
+def fetch_booking_page(page, url: str, slot_date: date) -> str:
+    """Fetch a bookings.better.org.uk date-specific page and return HTML."""
+    log.info("  → %s", url)
+
+    def _on_response(response):
+        if response.status == 200 and "json" in response.headers.get("content-type", ""):
+            ru = response.url
+            if any(k in ru.lower() for k in ("slot", "session", "avail", "book", "timetable")):
+                log.info("  [API] %s", ru[:200])
+
+    page.on("response", _on_response)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    except PWTimeout:
+        log.warning("  domcontentloaded timed out for %s", url)
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=30_000)
+    except PWTimeout:
+        pass
+
+    html = page.content()
+    page.remove_listener("response", _on_response)
+    return html
+
+
+def parse_booking_page(html: str, venue: dict, time_windows: list[dict], slot_date: date) -> list[dict]:
+    """Parse a bookings.better.org.uk by-time page.
+
+    The date is already known (it's in the URL), so we only need to find
+    available time slots and filter by the time windows.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    slots: list[dict] = []
+    seen: set[str] = set()
+
+    # Collect all text containing a time pattern; skip anything that looks unavailable
+    for el in soup.find_all(True):
+        text = el.get_text(" ", strip=True)
+        if not text or len(text) > 500:
+            continue
+
+        # Skip booked / unavailable slots
+        tl = text.lower()
+        if any(w in tl for w in ("unavailable", "booked", "full", "sold out", "closed")):
+            continue
+
+        time_str = _extract_time_from_text(text)
+        if not time_str or time_str in seen:
+            continue
+
+        in_window, label = time_in_window(time_str, time_windows, slot_date)
+        if not in_window:
+            continue
+
+        seen.add(time_str)
+
+        # Look for a booking link nearby
+        link_el = el.select_one("a[href]") or el.find_parent("a")
+        book_url = venue["book_url"]
+        if link_el and link_el.get("href"):
+            href = link_el["href"]
+            book_url = href if href.startswith("http") else "https://bookings.better.org.uk" + href
+
+        slots.append({
+            "venue": venue["name"],
+            "session_type": "",
+            "date": slot_date.strftime("%A %d %B %Y"),
+            "date_iso": slot_date.isoformat(),
+            "time": time_str,
+            "window": label,
+            "book_url": book_url,
+        })
+
+    return slots
+
+
+# ---------------------------------------------------------------------------
 # Main checker
 # ---------------------------------------------------------------------------
 
@@ -446,10 +528,11 @@ def _column_index(row, soup) -> int:
 def check_all(venues: list[dict], time_windows: list[dict], days_ahead: int) -> list[dict]:
     today = date.today()
     date_to = today + timedelta(days=days_ahead - 1)
+    dates_ahead: list[date] = [today + timedelta(days=d) for d in range(days_ahead)]
 
-    # Determine which week-start dates we need to fetch per venue
+    # Week-start dates for venues using the old weekly-timetable URLs
     week_starts: list[date] = sorted(
-        {_week_start(today + timedelta(days=d)) for d in range(days_ahead)}
+        {_week_start(d) for d in dates_ahead}
     )
 
     all_slots: list[dict] = []
@@ -468,12 +551,25 @@ def check_all(venues: list[dict], time_windows: list[dict], days_ahead: int) -> 
 
         for venue in venues:
             log.info("Checking %s", venue["name"])
-            for ws in week_starts:
-                html = fetch_timetable(page, venue["timetable_url"], ws)
-                slots = parse_timetable(html, venue, time_windows, today, date_to)
-                if slots:
-                    log.info("  Found %d matching slot(s) week of %s", len(slots), ws)
-                all_slots.extend(slots)
+
+            if "booking_url_template" in venue:
+                # bookings.better.org.uk: one request per day, date known from URL
+                tmpl = venue["booking_url_template"]
+                for check_date in dates_ahead:
+                    url = tmpl.format(date=check_date.isoformat())
+                    html = fetch_booking_page(page, url, check_date)
+                    slots = parse_booking_page(html, venue, time_windows, check_date)
+                    if slots:
+                        log.info("  Found %d slot(s) on %s", len(slots), check_date)
+                    all_slots.extend(slots)
+            else:
+                # www.better.org.uk weekly timetable fallback
+                for ws in week_starts:
+                    html = fetch_timetable(page, venue["timetable_url"], ws)
+                    slots = parse_timetable(html, venue, time_windows, today, date_to)
+                    if slots:
+                        log.info("  Found %d matching slot(s) week of %s", len(slots), ws)
+                    all_slots.extend(slots)
 
         browser.close()
 
