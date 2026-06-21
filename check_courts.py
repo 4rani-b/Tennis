@@ -203,7 +203,7 @@ def filter_slots(
             end = _parse_hhmm(w["end"])
             if start is None or end is None:
                 continue
-            if start <= slot_time <= end:
+            if start <= slot_time < end:
                 in_window = True
                 window_label = w.get("label", f"{w['start']}–{w['end']}")
                 break
