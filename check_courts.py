@@ -108,18 +108,29 @@ def fetch_timetable(page, url: str, start_date: date) -> str:
     """Navigate to a timetable page for a given week start and return HTML."""
     full_url = f"{url}?start_date={start_date.isoformat()}"
     log.info("  → %s", full_url)
+
+    # Intercept JSON responses to surface any timetable API endpoints
+    def _on_response(response):
+        if response.status == 200 and "json" in response.headers.get("content-type", ""):
+            ru = response.url
+            if any(k in ru.lower() for k in ("timetable", "session", "schedule", "activity", "slot")):
+                log.info("  [API] %s", ru[:200])
+
+    page.on("response", _on_response)
     try:
         page.goto(full_url, wait_until="domcontentloaded", timeout=30_000)
-        # Wait for timetable content or empty-state — broader selector set
-        page.wait_for_selector(
-            ".weekly-timetable__row, .weekly-timetable__empty-title, "
-            "[data-category], [data-date], .timetable-session, .session",
-            timeout=30_000,
-        )
     except PWTimeout:
-        log.warning("  Timetable load timed out for %s", full_url)
+        log.warning("  domcontentloaded timed out for %s", full_url)
+
+    # After initial load, wait for the JS app to render timetable data.
+    # networkidle fires once all pending requests settle; give it 30s.
+    try:
+        page.wait_for_load_state("networkidle", timeout=30_000)
+    except PWTimeout:
+        pass  # Proceed with whatever is in the DOM
+
     html = page.content()
-    log.info("  HTML sample (first 1000 chars): %.1000s", html.replace("\n", " "))
+    page.remove_listener("response", _on_response)
     return html
 
 
@@ -466,7 +477,15 @@ def check_all(venues: list[dict], time_windows: list[dict], days_ahead: int) -> 
 
         browser.close()
 
-    return all_slots
+    # Deduplicate across week fetches (same slot can appear in two weekly pages)
+    seen_keys: set[tuple] = set()
+    unique: list[dict] = []
+    for s in all_slots:
+        key = (s["venue"], s["date_iso"], s["time"])
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique.append(s)
+    return unique
 
 
 # ---------------------------------------------------------------------------
