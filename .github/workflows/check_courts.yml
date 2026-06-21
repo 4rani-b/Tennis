@@ -65,7 +65,7 @@ jobs:
           CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
         run: |
           sleep 900
-          curl -s -X POST \
+          curl -s -f -m 30 -X POST \
             -H "Authorization: Bearer $CRON_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
