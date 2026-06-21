@@ -238,9 +238,10 @@ def check_all(config: dict, state_path: str) -> list:
     today = now_london.date()
     dates_to_check = [today + timedelta(days=d) for d in range(days_ahead)]
 
-    seen = load_state(state_path)
-    log.info("Loaded %d previously seen composite_key(s)", len(seen))
+    last_available = load_state(state_path)
+    log.info("Loaded %d composite_key(s) from last run", len(last_available))
 
+    current_available = set()
     new_slots = []
 
     with requests.Session() as session:
@@ -256,9 +257,11 @@ def check_all(config: dict, state_path: str) -> list:
 
                 for slot in matched:
                     ck = slot["composite_key"]
-                    if not ck or ck in seen:
+                    if not ck:
                         continue
-                    seen.add(ck)
+                    current_available.add(ck)
+                    if ck in last_available:
+                        continue
                     new_slots.append({
                         "venue_name": venue["name"],
                         "slug": slug,
@@ -271,7 +274,7 @@ def check_all(config: dict, state_path: str) -> list:
                         "window": slot["window"],
                     })
 
-    save_state(state_path, seen)
+    save_state(state_path, current_available)
     return new_slots
 
 
