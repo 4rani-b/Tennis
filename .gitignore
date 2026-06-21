@@ -1,5 +1,15 @@
+# State file managed via GitHub Actions cache — not committed
+state/seen_slots.json
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.py[cod]
+*.egg-info/
 .env
+.venv/
+venv/
+
+# Claude Code agent worktrees
 .claude/
