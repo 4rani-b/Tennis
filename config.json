@@ -14,7 +14,7 @@
 
   "time_windows": [
     {
-      "start": "18:00", "end": "23:00",
+      "start": "18:00", "end": "21:00",
       "label": "Evening",
       "days": ["Mon", "Tue", "Wed", "Thu", "Fri"]
     },
