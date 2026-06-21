@@ -238,8 +238,9 @@ def check_all(config: dict, state_path: str) -> list:
     today = now_london.date()
     dates_to_check = [today + timedelta(days=d) for d in range(days_ahead)]
 
-    last_available = load_state(state_path)
-    log.info("Loaded %d composite_key(s) from last run", len(last_available))
+    send_all = os.getenv("SEND_ALL", "").lower() == "true"
+    last_available = set() if send_all else load_state(state_path)
+    log.info("Loaded %d composite_key(s) from last run%s", len(last_available), " (send_all mode)" if send_all else "")
 
     current_available = set()
     new_slots = []

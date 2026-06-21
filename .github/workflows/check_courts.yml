@@ -5,6 +5,11 @@ on:
     # Runs every 15 minutes during UK waking hours (06:00–23:00 UTC, covers BST evenings).
     - cron: "0,15,30,45 6-23 * * *"
   workflow_dispatch:
+    inputs:
+      send_all:
+        description: "Send all currently available slots (ignores deduplication)"
+        type: boolean
+        default: false
 
 jobs:
   check:
@@ -38,4 +43,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DAYS_AHEAD: "7"
+          SEND_ALL: ${{ github.event.inputs.send_all }}
         run: python check_courts.py
