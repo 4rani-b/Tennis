@@ -252,8 +252,19 @@ def _parse_rows(
             href = link_el["href"]
             book_url = href if href.startswith("http") else BETTER_BASE + href
 
+        # Session detail (indoor / outdoor / court type)
+        row_text_lower = row.get_text(" ", strip=True).lower()
+        subcategory = (row.get("data-subcategory") or row.get("data-session") or "").strip()
+        if "indoor" in row_text_lower or "indoor" in subcategory.lower():
+            session_type = "Indoor"
+        elif "outdoor" in row_text_lower or "outdoor" in subcategory.lower():
+            session_type = "Outdoor"
+        else:
+            session_type = subcategory or ""
+
         slots.append({
             "venue": venue["name"],
+            "session_type": session_type,
             "date": slot_date.strftime("%A %d %B %Y"),
             "date_iso": slot_date.isoformat(),
             "time": str(time_str),
@@ -294,12 +305,42 @@ def _parse_generic(
     date_from: date,
     date_to: date,
 ) -> list[dict]:
-    """Last-resort: find time slots and try to infer their date from DOM ancestors."""
+    """Last-resort: find time slots and try to infer their date from DOM context.
+
+    Better's timetable is a column-per-day layout: date headers are siblings of
+    day columns, not ancestors of individual slot elements.  Walking ancestors
+    (up to 6 levels) misses them.  Instead we:
+    1. Pre-scan every element for date markers and record their document-order
+       position.
+    2. For each time slot, find the nearest preceding date marker.
+    """
     slots: list[dict] = []
     seen: set[tuple] = set()
     cat_filter = venue.get("category_filter", "")
 
-    for el in soup.find_all(True):
+    all_els = list(soup.find_all(True))
+    el_to_idx: dict[int, int] = {id(el): i for i, el in enumerate(all_els)}
+
+    # Collect (document_index, date) pairs, deduped by position
+    dated_positions: list[tuple[int, date]] = []
+    seen_positions: set[int] = set()
+    for i, el in enumerate(all_els):
+        d: "date | None" = None
+        d_val = el.get("data-date") or el.get("data-timetables_items_date")
+        if d_val:
+            try:
+                d = date.fromisoformat(d_val[:10])
+            except ValueError:
+                pass
+        if d is None:
+            text = el.get_text(" ", strip=True) if hasattr(el, "get_text") else ""
+            if 3 < len(text) < 50:
+                d = _extract_date_from_text(text, date_from.year)
+        if d and date_from <= d <= date_to and i not in seen_positions:
+            dated_positions.append((i, d))
+            seen_positions.add(i)
+
+    for el in all_els:
         text = el.get_text(" ", strip=True)
         if not text or len(text) > 3000:
             continue
@@ -312,18 +353,29 @@ def _parse_generic(
         if not time_str:
             continue
 
-        # Walk up ancestors (up to 6 levels) looking for a date
+        el_idx = el_to_idx.get(id(el), -1)
         slot_date: "date | None" = None
+
+        # Try ancestor data-date first (fast, precise)
         for candidate in [el] + list(el.parents)[:6]:
-            if not hasattr(candidate, "get_text"):
+            if not hasattr(candidate, "get"):
                 continue
-            candidate_text = candidate.get_text(" ", strip=True)
-            if len(candidate_text) > 5000:
-                continue
-            d = _extract_date_from_text(candidate_text, date_from.year)
-            if d and date_from <= d <= date_to:
-                slot_date = d
-                break
+            d_val = candidate.get("data-date") or candidate.get("data-timetables_items_date")
+            if d_val:
+                try:
+                    d = date.fromisoformat(d_val[:10])
+                    if date_from <= d <= date_to:
+                        slot_date = d
+                        break
+                except ValueError:
+                    pass
+
+        # Fall back to nearest preceding date element in document order
+        if slot_date is None:
+            for pos, d in reversed(dated_positions):
+                if pos < el_idx:
+                    slot_date = d
+                    break
 
         in_window, label = time_in_window(time_str, time_windows, slot_date)
         if not in_window:
@@ -334,8 +386,18 @@ def _parse_generic(
             continue
         seen.add(key)
 
+        # Try to detect indoor/outdoor from element text
+        text_lower = text.lower()
+        if "indoor" in text_lower:
+            session_type = "Indoor"
+        elif "outdoor" in text_lower:
+            session_type = "Outdoor"
+        else:
+            session_type = ""
+
         slots.append({
             "venue": venue["name"],
+            "session_type": session_type,
             "date": slot_date.strftime("%A %d %B %Y") if slot_date else "this week",
             "date_iso": slot_date.isoformat() if slot_date else date_from.isoformat(),
             "time": time_str,
@@ -415,8 +477,11 @@ def check_all(venues: list[dict], time_windows: list[dict], days_ahead: int) -> 
 def _format_slots_text(slots: list[dict]) -> str:
     lines = [f"🎾 {len(slots)} tennis court slot(s) available — book now!\n"]
     for s in slots:
+        venue_str = s["venue"]
+        if s.get("session_type"):
+            venue_str += f" ({s['session_type']})"
         lines.append(
-            f"• {s['venue']}\n"
+            f"• {venue_str}\n"
             f"  {s['date']} at {s['time']}  ({s['window']})\n"
             f"  {s['book_url']}\n"
         )
@@ -432,8 +497,11 @@ def _send_telegram(slots: list[dict], config: dict) -> bool:
 
     lines = ["🎾 <b>Tennis court available!</b>\n"]
     for s in slots:
+        venue_line = f"📍 <b>{s['venue']}</b>"
+        if s.get("session_type"):
+            venue_line += f" ({s['session_type']})"
         lines.append(
-            f"📍 <b>{s['venue']}</b>\n"
+            f"{venue_line}\n"
             f"🗓 {s['date']} at <b>{s['time']}</b>\n"
             f"🔗 <a href=\"{s['book_url']}\">Book now</a>\n"
         )
