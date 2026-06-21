@@ -443,15 +443,30 @@ def _column_index(row, soup) -> int:
 # ---------------------------------------------------------------------------
 
 
-def fetch_booking_page(page, url: str, slot_date: date) -> str:
-    """Fetch a bookings.better.org.uk date-specific page and return HTML."""
+def fetch_booking_page(page, url: str, slot_date: date) -> tuple[str, list[dict]]:
+    """Fetch a bookings.better.org.uk date-specific page.
+
+    Returns (html, api_responses) where api_responses is a list of
+    {url, data} dicts for every non-translation JSON response intercepted.
+    """
     log.info("  → %s", url)
+    api_responses: list[dict] = []
 
     def _on_response(response):
-        if response.status == 200 and "json" in response.headers.get("content-type", ""):
-            ru = response.url
-            if any(k in ru.lower() for k in ("slot", "session", "avail", "book", "timetable")):
-                log.info("  [API] %s", ru[:200])
+        ct = response.headers.get("content-type", "")
+        if response.status != 200 or "json" not in ct:
+            return
+        ru = response.url
+        if "/translations/" in ru:
+            return
+        log.info("  [API] %s", ru[:200])
+        try:
+            data = response.json()
+            api_responses.append({"url": ru, "data": data})
+            preview = json.dumps(data)[:300]
+            log.info("  [API body] %s", preview)
+        except Exception:
+            pass
 
     page.on("response", _on_response)
     try:
@@ -466,27 +481,119 @@ def fetch_booking_page(page, url: str, slot_date: date) -> str:
 
     html = page.content()
     page.remove_listener("response", _on_response)
-    return html
+    return html, api_responses
 
 
-def parse_booking_page(html: str, venue: dict, time_windows: list[dict], slot_date: date) -> list[dict]:
+def _slots_from_api(api_responses: list[dict], venue: dict, time_windows: list[dict], slot_date: date) -> list[dict]:
+    """Try to extract available slots from intercepted API JSON responses.
+
+    Returns an empty list if no recognisable slot data is found, so the
+    caller can fall back to HTML parsing.
+    """
+    slots: list[dict] = []
+    seen: set[str] = set()
+
+    for resp in api_responses:
+        data = resp["data"]
+        candidates: list = []
+
+        # Common patterns: list at root, or nested under "data", "slots",
+        # "sessions", "activities", "results", "items"
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict):
+            for key in ("slots", "sessions", "activities", "results", "items", "data", "bookings"):
+                v = data.get(key)
+                if isinstance(v, list) and v:
+                    candidates = v
+                    break
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+
+            # Availability check
+            spaces = item.get("spaces") or item.get("free_spaces") or item.get("availability") or item.get("remaining")
+            if spaces is not None:
+                try:
+                    if int(spaces) <= 0:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            status = str(item.get("status") or item.get("booking_status") or "").lower()
+            if status in ("unavailable", "booked", "full", "closed", "cancelled"):
+                continue
+
+            # Time
+            time_str = (
+                item.get("start_time") or item.get("startTime") or item.get("time")
+                or item.get("start") or item.get("slot_time") or ""
+            )
+            if not time_str:
+                time_str = _extract_time_from_text(str(item))
+            if not time_str:
+                continue
+            time_str = str(time_str)[:5]  # normalise to HH:MM
+
+            if time_str in seen:
+                continue
+
+            in_window, label = time_in_window(time_str, time_windows, slot_date)
+            if not in_window:
+                continue
+
+            seen.add(time_str)
+
+            book_url = item.get("booking_url") or item.get("url") or venue["book_url"]
+            if book_url and not book_url.startswith("http"):
+                book_url = "https://bookings.better.org.uk" + book_url
+
+            slots.append({
+                "venue": venue["name"],
+                "session_type": "",
+                "date": slot_date.strftime("%A %d %B %Y"),
+                "date_iso": slot_date.isoformat(),
+                "time": time_str,
+                "window": label,
+                "book_url": book_url,
+            })
+
+    return slots
+
+
+def parse_booking_page(html: str, api_responses: list[dict], venue: dict, time_windows: list[dict], slot_date: date) -> list[dict]:
     """Parse a bookings.better.org.uk by-time page.
 
-    The date is already known (it's in the URL), so we only need to find
-    available time slots and filter by the time windows.
+    Tries API response data first (more reliable), falls back to HTML parsing.
     """
+    # Try structured API data first
+    api_slots = _slots_from_api(api_responses, venue, time_windows, slot_date)
+    if api_slots:
+        return api_slots
+
+    # HTML fallback — look for slot cards that have a booking button/link
     soup = BeautifulSoup(html, "lxml")
     slots: list[dict] = []
     seen: set[str] = set()
 
-    # Collect all text containing a time pattern; skip anything that looks unavailable
+    # Target elements that look like bookable slot cards:
+    # they should contain a time AND a booking action (button or link with book/add/select text)
+    booking_keywords = {"book", "add to", "select", "reserve", "basket"}
+
     for el in soup.find_all(True):
         text = el.get_text(" ", strip=True)
-        if not text or len(text) > 500:
+        if not text or len(text) > 600:
             continue
 
-        # Skip booked / unavailable slots
         tl = text.lower()
+
+        # Must have a booking action present in or near this element
+        has_action = any(k in tl for k in booking_keywords)
+        if not has_action:
+            continue
+
+        # Skip anything marked as unavailable
         if any(w in tl for w in ("unavailable", "booked", "full", "sold out", "closed")):
             continue
 
@@ -500,7 +607,6 @@ def parse_booking_page(html: str, venue: dict, time_windows: list[dict], slot_da
 
         seen.add(time_str)
 
-        # Look for a booking link nearby
         link_el = el.select_one("a[href]") or el.find_parent("a")
         book_url = venue["book_url"]
         if link_el and link_el.get("href"):
@@ -557,8 +663,8 @@ def check_all(venues: list[dict], time_windows: list[dict], days_ahead: int) -> 
                 tmpl = venue["booking_url_template"]
                 for check_date in dates_ahead:
                     url = tmpl.format(date=check_date.isoformat())
-                    html = fetch_booking_page(page, url, check_date)
-                    slots = parse_booking_page(html, venue, time_windows, check_date)
+                    html, api_responses = fetch_booking_page(page, url, check_date)
+                    slots = parse_booking_page(html, api_responses, venue, time_windows, check_date)
                     if slots:
                         log.info("  Found %d slot(s) on %s", len(slots), check_date)
                     all_slots.extend(slots)
