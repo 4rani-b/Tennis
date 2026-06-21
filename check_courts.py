@@ -55,40 +55,44 @@ def load_config() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def load_state(path: str) -> set:
-    """Load seen composite_keys from state file. Returns empty set if missing/stale."""
+def load_state(path: str) -> dict:
+    """Load state from file. Returns dict with 'available' set and 'telegram_offset' int."""
+    empty = {"available": set(), "telegram_offset": 0}
     if not os.path.exists(path):
-        return set()
+        return empty
     try:
         with open(path) as fh:
             data = json.load(fh)
         updated_str = data.get("updated", "")
         if updated_str:
             updated = datetime.fromisoformat(updated_str)
-            # Ensure timezone-aware comparison
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=LONDON_TZ)
             age = datetime.now(tz=LONDON_TZ) - updated
             if age > timedelta(hours=STATE_MAX_AGE_HOURS):
                 log.info("State file is >%dh old — resetting", STATE_MAX_AGE_HOURS)
-                return set()
-        return set(data.get("seen", []))
+                return empty
+        return {
+            "available": set(data.get("seen", [])),
+            "telegram_offset": int(data.get("telegram_offset", 0)),
+        }
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         log.warning("Could not read state file %s: %s", path, exc)
-        return set()
+        return empty
 
 
-def save_state(path: str, seen: set) -> None:
-    """Save seen composite_keys to state file."""
+def save_state(path: str, available: set, telegram_offset: int) -> None:
+    """Save available composite_keys and telegram_offset to state file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = {
-        "seen": sorted(seen),
+        "seen": sorted(available),
+        "telegram_offset": telegram_offset,
         "updated": datetime.now(tz=LONDON_TZ).isoformat(),
     }
     try:
         with open(path, "w") as fh:
             json.dump(data, fh, indent=2)
-        log.info("State saved: %d key(s) in %s", len(seen), path)
+        log.info("State saved: %d key(s) in %s", len(available), path)
     except OSError as exc:
         log.error("Could not save state file %s: %s", path, exc)
 
@@ -228,8 +232,8 @@ def filter_slots(
 # ---------------------------------------------------------------------------
 
 
-def check_all(config: dict, state_path: str) -> list:
-    """Check all venues for new slots. Returns list of new slot dicts."""
+def check_all(config: dict, state: dict, send_all: bool = False) -> tuple[list, set]:
+    """Check all venues for new slots. Returns (new_slots, current_available)."""
     venues = config.get("venues", [])
     time_windows = config.get("time_windows", [])
     days_ahead = int(os.getenv("DAYS_AHEAD") or config.get("days_ahead", 7))
@@ -238,9 +242,14 @@ def check_all(config: dict, state_path: str) -> list:
     today = now_london.date()
     dates_to_check = [today + timedelta(days=d) for d in range(days_ahead)]
 
-    seen = load_state(state_path)
-    log.info("Loaded %d previously seen composite_key(s)", len(seen))
+    last_available = set() if send_all else state["available"]
+    log.info(
+        "Loaded %d composite_key(s) from last run%s",
+        len(last_available),
+        " (send_all mode)" if send_all else "",
+    )
 
+    current_available = set()
     new_slots = []
 
     with requests.Session() as session:
@@ -256,9 +265,11 @@ def check_all(config: dict, state_path: str) -> list:
 
                 for slot in matched:
                     ck = slot["composite_key"]
-                    if not ck or ck in seen:
+                    if not ck:
                         continue
-                    seen.add(ck)
+                    current_available.add(ck)
+                    if ck in last_available:
+                        continue
                     new_slots.append({
                         "venue_name": venue["name"],
                         "slug": slug,
@@ -271,8 +282,56 @@ def check_all(config: dict, state_path: str) -> list:
                         "window": slot["window"],
                     })
 
-    save_state(state_path, seen)
-    return new_slots
+    return new_slots, current_available
+
+
+# ---------------------------------------------------------------------------
+# Telegram command polling
+# ---------------------------------------------------------------------------
+
+COMMAND_TRIGGERS = {"/all", "/check", "/courts"}
+
+
+def poll_telegram_commands(config: dict, state: dict) -> bool:
+    """
+    Poll Telegram for new messages. Returns True if a recognized command was sent
+    from the configured chat_id. Updates state["telegram_offset"] in-place.
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or config.get("telegram_bot_token", "")
+    chat_id = str(os.getenv("TELEGRAM_CHAT_ID") or config.get("telegram_chat_id", ""))
+    if not token or not chat_id:
+        return False
+
+    offset = state.get("telegram_offset", 0)
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params = {"offset": offset, "timeout": 0, "limit": 100}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        updates = resp.json().get("result", [])
+    except requests.RequestException as exc:
+        log.warning("Telegram getUpdates failed: %s", exc)
+        return False
+
+    triggered = False
+    for update in updates:
+        update_id = update.get("update_id", 0)
+        state["telegram_offset"] = max(state["telegram_offset"], update_id + 1)
+
+        msg = update.get("message") or update.get("channel_post", {})
+        if not msg:
+            continue
+        if str(msg.get("chat", {}).get("id", "")) != chat_id:
+            continue
+
+        text = (msg.get("text") or "").strip().lower().split()[0] if msg.get("text") else ""
+        # Strip bot username suffix (e.g. /all@mybot)
+        text = text.split("@")[0] if text else ""
+        if text in COMMAND_TRIGGERS:
+            log.info("Telegram command '%s' received — triggering send_all", text)
+            triggered = True
+
+    return triggered
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +409,18 @@ def main() -> None:
     config = load_config()
     state_path = os.getenv("STATE_PATH") or DEFAULT_STATE_PATH
 
-    new_slots = check_all(config, state_path)
+    state = load_state(state_path)
+
+    # Check for Telegram commands (/all, /check, /courts)
+    command_send_all = poll_telegram_commands(config, state)
+
+    send_all = command_send_all or os.getenv("SEND_ALL", "").lower() == "true"
+    if send_all:
+        log.info("send_all mode active")
+
+    new_slots, current_available = check_all(config, state, send_all=send_all)
+
+    save_state(state_path, current_available, state["telegram_offset"])
 
     if new_slots:
         log.info("Found %d new slot(s)", len(new_slots))
