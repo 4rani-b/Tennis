@@ -3,7 +3,7 @@ name: Tennis Court Availability Check
 on:
   schedule:
     # Backup schedule in case the self-chain breaks.
-    - cron: "0,15,30,45 6-23 * * *"
+    - cron: "*/5 6-23 * * *"
   workflow_dispatch:
     inputs:
       send_all:
@@ -64,7 +64,7 @@ jobs:
         env:
           CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
         run: |
-          sleep 900
+          sleep 300
           for i in 1 2 3; do
             curl -s -f -m 30 -X POST \
               -H "Authorization: Bearer $CRON_TOKEN" \
