@@ -52,26 +52,25 @@ jobs:
         run: python check_courts.py
 
   reschedule:
-    name: Schedule next run
+    name: Trigger next run
     needs: check
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     # Run even if check fails — keeps the chain alive. Skip only on send_all runs.
     if: ${{ !cancelled() && github.event.inputs.send_all != 'true' }}
 
     steps:
-      - name: Wait 15 minutes then trigger next run
+      - name: Trigger next run immediately
         env:
           CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
         run: |
-          sleep 300
-          for i in 1 2 3; do
+          for i in 1 2 3 4; do
             curl -s -f -m 30 -X POST \
               -H "Authorization: Bearer $CRON_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
               https://api.github.com/repos/4rani-b/Tennis/actions/workflows/check_courts.yml/dispatches \
               -d '{"ref":"main"}' && break
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
+            echo "Attempt $i failed, retrying in 30s..."
+            sleep 30
           done
