@@ -58,6 +58,7 @@ jobs:
             end=$(($(date +%s) + 1680))
             while [ "$(date +%s)" -lt "$end" ]; do
               python check_courts.py || true
+              sleep 60
             done
           fi
 
