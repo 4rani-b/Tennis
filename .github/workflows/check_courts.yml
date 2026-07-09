@@ -2,8 +2,8 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    - cron: "0 6-23 * * *"   # Top of the hour
-    - cron: "30 6-23 * * *"  # Half-hour — ensures continuous coverage
+    - cron: "0 * * * *"    # Top of the hour
+    - cron: "30 * * * *"   # Half-hour — ensures continuous coverage
   workflow_dispatch:
     inputs:
       send_all:
@@ -57,7 +57,7 @@ jobs:
             # Loop for 28 minutes, then exit cleanly before the next cron fires.
             end=$(($(date +%s) + 1680))
             while [ "$(date +%s)" -lt "$end" ]; do
-              python check_courts.py || true
+              python check_courts.py || echo "WARNING: check_courts.py failed with exit code $?"
               sleep 15
             done
           fi
