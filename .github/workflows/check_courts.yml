@@ -14,7 +14,7 @@ on:
 # Prevent overlapping runs
 concurrency:
   group: tennis-check
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   check:
