@@ -10,6 +10,8 @@ only for newly available slots.
 import json
 import logging
 import os
+import sys
+import traceback
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -401,6 +403,35 @@ def _print_slots(slots: list) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Error alerting
+# ---------------------------------------------------------------------------
+
+
+def _send_error_alert(config: dict) -> None:
+    """Send crash traceback to Telegram. Best-effort — never raises."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or config.get("telegram_bot_token", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID") or config.get("telegram_chat_id", "")
+    if not token or not chat_id:
+        return
+    tb = traceback.format_exc()
+    if len(tb) > 600:
+        tb = "..." + tb[-600:]
+    tb_escaped = tb.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": f"⚠️ <b>Court checker crashed</b>\n\n<pre>{tb_escaped}</pre>",
+                "parse_mode": "HTML",
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -430,4 +461,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("Unhandled exception — sending Telegram alert")
+        _send_error_alert(load_config())
+        sys.exit(1)
