@@ -2,7 +2,7 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    # Hourly fallback in case the self-chain breaks (rare cron = less concurrency interference).
+    # Hourly fallback in case the self-chain breaks.
     - cron: "0 6-23 * * *"
   workflow_dispatch:
     inputs:
@@ -20,7 +20,7 @@ jobs:
   check:
     name: Check court availability
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -51,16 +51,8 @@ jobs:
           SEND_ALL: ${{ github.event.inputs.send_all }}
         run: python check_courts.py
 
-  reschedule:
-    name: Trigger next run
-    needs: check
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Run even if check fails — keeps the chain alive. Skip only on send_all runs.
-    if: ${{ !cancelled() && github.event.inputs.send_all != 'true' }}
-
-    steps:
-      - name: Trigger next run immediately
+      - name: Trigger next run
+        if: ${{ always() && github.event.inputs.send_all != 'true' }}
         env:
           CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
         run: |
