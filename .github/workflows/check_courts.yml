@@ -2,8 +2,7 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    - cron: "0 * * * *"    # Top of the hour
-    - cron: "30 * * * *"   # Half-hour — ensures continuous coverage
+    - cron: "*/15 * * * *"  # Safety net: restarts chain if it ever breaks
   workflow_dispatch:
     inputs:
       send_all:
@@ -11,17 +10,22 @@ on:
         type: boolean
         default: false
 
-# A new run cancels the current one. State is saved before exit (if: always),
-# so cancellation is clean and deduplication is never broken.
+# cancel-in-progress: true means a cron (or a new manual trigger) always
+# dislodges a stuck queued run. State is saved BEFORE the trigger step, so
+# a cancellation mid-trigger cannot cause data loss.
 concurrency:
   group: tennis-check
   cancel-in-progress: true
+
+# GITHUB_TOKEN needs actions:write to trigger workflow_dispatch.
+permissions:
+  actions: write
 
 jobs:
   check:
     name: Check courts
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -54,17 +58,24 @@ jobs:
           if [ "${SEND_ALL}" = "true" ]; then
             python check_courts.py
           else
-            # Loop for 28 minutes, then exit cleanly before the next cron fires.
-            end=$(($(date +%s) + 1680))
-            while [ "$(date +%s)" -lt "$end" ]; do
-              python check_courts.py || echo "WARNING: check_courts.py failed with exit code $?"
-              sleep 15
-            done
+            python check_courts.py || echo "WARNING: check_courts.py failed with exit code $?"
           fi
 
+      # Save state BEFORE triggering the next run, so a cancellation
+      # mid-trigger cannot race the cache write.
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
         with:
           path: state/seen_slots.json
           key: tennis-state-v1-${{ github.run_id }}
+
+      # Only trigger when not cancelled. If this run was cancelled by a cron
+      # or an incoming trigger, that incoming run handles continuation itself.
+      - name: Trigger next run
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run check_courts.yml --ref main \
+            || echo "WARNING: Failed to trigger next run — cron will restart within 15 min"
