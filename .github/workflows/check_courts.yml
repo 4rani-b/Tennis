@@ -2,8 +2,8 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    # Hourly fallback in case the self-chain breaks.
-    - cron: "0 6-23 * * *"
+    - cron: "0 6-23 * * *"   # Top of the hour
+    - cron: "30 6-23 * * *"  # Half-hour — ensures continuous coverage
   workflow_dispatch:
     inputs:
       send_all:
@@ -11,16 +11,17 @@ on:
         type: boolean
         default: false
 
-# cancel-in-progress: true lets new runs boot stuck/queued runs immediately.
+# A new run cancels the current one. State is saved before exit (if: always),
+# so cancellation is clean and deduplication is never broken.
 concurrency:
   group: tennis-check
   cancel-in-progress: true
 
 jobs:
   check:
-    name: Check court availability
+    name: Check courts
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -32,10 +33,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore slot state cache
+      - name: Restore state
         uses: actions/cache/restore@v4
         with:
           path: state/seen_slots.json
@@ -43,32 +44,26 @@ jobs:
           restore-keys: |
             tennis-state-v1-
 
-      - name: Check court availability
+      - name: Check courts
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DAYS_AHEAD: "7"
           SEND_ALL: ${{ github.event.inputs.send_all }}
-        run: python check_courts.py
+        run: |
+          if [ "${SEND_ALL}" = "true" ]; then
+            python check_courts.py
+          else
+            # Loop for 28 minutes, then exit cleanly before the next cron fires.
+            end=$(($(date +%s) + 1680))
+            while [ "$(date +%s)" -lt "$end" ]; do
+              python check_courts.py || true
+            done
+          fi
 
-      - name: Save slot state cache
+      - name: Save state
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: state/seen_slots.json
           key: tennis-state-v1-${{ github.run_id }}
-
-      - name: Trigger next run
-        if: ${{ always() && github.event.inputs.send_all != 'true' }}
-        env:
-          CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
-        run: |
-          for i in 1 2 3 4; do
-            curl -s -f -m 30 -X POST \
-              -H "Authorization: Bearer $CRON_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              https://api.github.com/repos/4rani-b/Tennis/actions/workflows/check_courts.yml/dispatches \
-              -d '{"ref":"main"}' && break
-            echo "Attempt $i failed, retrying in 30s..."
-            sleep 30
-          done
