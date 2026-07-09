@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
 
-# Prevent overlapping runs
+# cancel-in-progress: true lets new runs boot stuck/queued runs immediately.
 concurrency:
   group: tennis-check
   cancel-in-progress: true
@@ -36,7 +36,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore slot state cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: state/seen_slots.json
           key: tennis-state-v1-${{ github.run_id }}
@@ -50,6 +50,12 @@ jobs:
           DAYS_AHEAD: "7"
           SEND_ALL: ${{ github.event.inputs.send_all }}
         run: python check_courts.py
+
+      - name: Save slot state cache
+        uses: actions/cache/save@v4
+        with:
+          path: state/seen_slots.json
+          key: tennis-state-v1-${{ github.run_id }}
 
       - name: Trigger next run
         if: ${{ always() && github.event.inputs.send_all != 'true' }}
