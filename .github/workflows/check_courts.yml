@@ -42,6 +42,8 @@ jobs:
 
       - name: Restore state
         uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
         with:
           path: state/seen_slots.json
           key: tennis-state-v1-${{ github.run_id }}
@@ -66,18 +68,20 @@ jobs:
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
+        timeout-minutes: 2
+        continue-on-error: true
         with:
           path: state/seen_slots.json
           key: tennis-state-v1-${{ github.run_id }}
 
-      # Only trigger when not cancelled. If this run was cancelled by a cron
-      # or an incoming trigger, that incoming run handles continuation itself.
+      # Always trigger the next run, even on timeout-cancel, so the chain
+      # survives a hung step. Concurrency handles any duplicate triggers.
       - name: Trigger next run
-        if: ${{ !cancelled() }}
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run check_courts.yml --ref main \
+          timeout 30 gh workflow run check_courts.yml --ref main \
             || echo "WARNING: Failed to trigger next run — cron will restart within 15 min"
 
       # Fires if any workflow-level step failed (checkout, pip install, etc.).
