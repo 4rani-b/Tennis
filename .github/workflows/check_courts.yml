@@ -37,6 +37,8 @@ jobs:
 
       - name: Restore slot state cache
         uses: actions/cache@v4
+        timeout-minutes: 2
+        continue-on-error: true
         with:
           path: state/seen_slots.json
           key: tennis-state-v1-${{ github.run_id }}
@@ -56,8 +58,8 @@ jobs:
     needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Don't self-chain on send_all runs or if no CRON_TOKEN secret is set
-    if: github.event.inputs.send_all != 'true'
+    # Run even if check failed/timed-out so the chain always restarts
+    if: always() && github.event.inputs.send_all != 'true'
 
     steps:
       - name: Wait 15 minutes then trigger next run
@@ -65,9 +67,10 @@ jobs:
           CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
         run: |
           sleep 900
-          curl -s -X POST \
+          timeout 30 curl -s -X POST \
             -H "Authorization: Bearer $CRON_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             https://api.github.com/repos/4rani-b/Tennis/actions/workflows/check_courts.yml/dispatches \
-            -d '{"ref":"main"}'
+            -d '{"ref":"main"}' \
+            || echo "WARNING: Failed to trigger next run — cron will restart"
