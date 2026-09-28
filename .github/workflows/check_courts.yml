@@ -2,7 +2,7 @@ name: Tennis Court Availability Check
 
 on:
   schedule:
-    - cron: "0,15,30,45 6-23 * * *"  # Safety net: restarts chain if it ever breaks (6am–midnight only)
+    - cron: "0,15,30,45 * * * *"  # Safety net: restarts chain if it ever breaks
   workflow_dispatch:
     inputs:
       send_all:
