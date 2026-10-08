@@ -58,8 +58,8 @@ def load_config() -> dict:
 
 
 def load_state(path: str) -> dict:
-    """Load state from file. Returns dict with 'available' set and 'telegram_offset' int."""
-    empty = {"available": set(), "telegram_offset": 0}
+    """Load state from file. Returns dict with 'available' set, 'recently_gone' set, and 'telegram_offset' int."""
+    empty = {"available": set(), "recently_gone": set(), "telegram_offset": 0}
     if not os.path.exists(path):
         return empty
     try:
@@ -76,6 +76,7 @@ def load_state(path: str) -> dict:
                 return empty
         return {
             "available": set(data.get("seen", [])),
+            "recently_gone": set(data.get("recently_gone", [])),
             "telegram_offset": int(data.get("telegram_offset", 0)),
         }
     except (json.JSONDecodeError, ValueError, OSError) as exc:
@@ -83,18 +84,19 @@ def load_state(path: str) -> dict:
         return empty
 
 
-def save_state(path: str, available: set, telegram_offset: int) -> None:
-    """Save available composite_keys and telegram_offset to state file."""
+def save_state(path: str, available: set, recently_gone: set, telegram_offset: int) -> None:
+    """Save available composite_keys, recently_gone keys, and telegram_offset to state file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = {
         "seen": sorted(available),
+        "recently_gone": sorted(recently_gone),
         "telegram_offset": telegram_offset,
         "updated": datetime.now(tz=LONDON_TZ).isoformat(),
     }
     try:
         with open(path, "w") as fh:
             json.dump(data, fh, indent=2)
-        log.info("State saved: %d key(s) in %s", len(available), path)
+        log.info("State saved: %d key(s), %d recently_gone in %s", len(available), len(recently_gone), path)
     except OSError as exc:
         log.error("Could not save state file %s: %s", path, exc)
 
@@ -234,8 +236,8 @@ def filter_slots(
 # ---------------------------------------------------------------------------
 
 
-def check_all(config: dict, state: dict, send_all: bool = False) -> tuple[list, set]:
-    """Check all venues for new slots. Returns (new_slots, current_available)."""
+def check_all(config: dict, state: dict, send_all: bool = False) -> tuple[list, set, set]:
+    """Check all venues for new slots. Returns (new_slots, current_available, recently_gone)."""
     venues = config.get("venues", [])
     time_windows = config.get("time_windows", [])
     days_ahead = int(os.getenv("DAYS_AHEAD") or config.get("days_ahead", 7))
@@ -245,9 +247,13 @@ def check_all(config: dict, state: dict, send_all: bool = False) -> tuple[list, 
     dates_to_check = [today + timedelta(days=d) for d in range(days_ahead)]
 
     last_available = set() if send_all else state["available"]
+    # Slots that disappeared last run (were booked). If they reappear now,
+    # re-notify even if last_available still lists them due to a stale cache.
+    recently_gone = set() if send_all else state.get("recently_gone", set())
     log.info(
-        "Loaded %d composite_key(s) from last run%s",
+        "Loaded %d composite_key(s) from last run, %d recently_gone%s",
         len(last_available),
+        len(recently_gone),
         " (send_all mode)" if send_all else "",
     )
 
@@ -270,7 +276,9 @@ def check_all(config: dict, state: dict, send_all: bool = False) -> tuple[list, 
                     if not ck:
                         continue
                     current_available.add(ck)
-                    if ck in last_available:
+                    # Skip if seen before — unless it recently disappeared (was booked),
+                    # in which case its return deserves a fresh notification.
+                    if ck in last_available and ck not in recently_gone:
                         continue
                     new_slots.append({
                         "venue_name": venue["name"],
@@ -284,7 +292,12 @@ def check_all(config: dict, state: dict, send_all: bool = False) -> tuple[list, 
                         "window": slot["window"],
                     })
 
-    return new_slots, current_available
+    # Slots that vanished this run were booked; re-notify if they come back next run.
+    new_recently_gone = last_available - current_available
+    if new_recently_gone:
+        log.info("%d slot(s) disappeared this run (booked?) — will re-notify if they return", len(new_recently_gone))
+
+    return new_slots, current_available, new_recently_gone
 
 
 # ---------------------------------------------------------------------------
@@ -449,9 +462,9 @@ def main() -> None:
     if send_all:
         log.info("send_all mode active")
 
-    new_slots, current_available = check_all(config, state, send_all=send_all)
+    new_slots, current_available, recently_gone = check_all(config, state, send_all=send_all)
 
-    save_state(state_path, current_available, state["telegram_offset"])
+    save_state(state_path, current_available, recently_gone, state["telegram_offset"])
 
     if new_slots:
         log.info("Found %d new slot(s)", len(new_slots))
