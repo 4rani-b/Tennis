@@ -83,9 +83,18 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          timeout 30 gh workflow run check_courts.yml --ref main \
-            || echo "WARNING: Failed to trigger next run — cron will restart within 15 min"
+          timeout 30 gh workflow run check_courts.yml --ref main || {
+            echo "WARNING: Failed to trigger next run — cron will restart within 15 min"
+            CHAT_ID=$(python3 -c "import json; print(json.load(open('config.json'))['telegram_chat_id'])" 2>/dev/null || echo "")
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=⚠️ Tennis checker chain died — GitHub failed to dispatch next run. Will auto-restart within 15 min." \
+                || true
+            fi
+          }
 
       # Fires if any workflow-level step failed (checkout, pip install, etc.).
       # Python-level crashes are handled inside check_courts.py itself.
